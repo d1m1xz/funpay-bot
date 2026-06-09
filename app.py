@@ -22,8 +22,8 @@ load_dotenv()
 # ========== КОНФИГУРАЦИЯ ==========
 FUNPAY_EMAIL = os.getenv("FUNPAY_EMAIL", "")
 FUNPAY_PASSWORD = os.getenv("FUNPAY_PASSWORD", "")
-FUNPAY_GOLDEN_KEY = os.getenv("FUNPAY_GOLDEN_KEY", "")
-
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # Настройки ИИ
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "sk-placeholder")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
