@@ -24,6 +24,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 PORT = int(os.getenv("PORT", 8080))
 CHECK_INTERVAL = 15
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://funpay-bot-cvaw.onrender.com")
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -32,25 +33,27 @@ logger = logging.getLogger(__name__)
 ua = UserAgent()
 processed_messages = set()
 message_lock = Lock()
+auto_reply_enabled = True
 
 # ========== TELEGRAM ==========
-def tg_send(text, disable_notification=False):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+def tg_send(chat_id, text, disable_notification=False):
+    if not TELEGRAM_TOKEN:
         return
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      data={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML",
+                      json={"chat_id": chat_id, "text": text, "parse_mode": "HTML",
                             "disable_notification": disable_notification}, timeout=10)
     except Exception as e:
         logger.error(f"TG: {e}")
 
-def tg_get_updates(offset=0):
+def tg_set_webhook():
+    """Устанавливает вебхук"""
     try:
-        r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-                         params={"offset": offset, "timeout": 5}, timeout=10)
-        return r.json().get("result", [])
-    except:
-        return []
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+        r = requests.post(url, json={"url": f"{WEBHOOK_URL}/webhook"}, timeout=10)
+        logger.info(f"Webhook set: {r.json()}")
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
 
 # ========== ОТВЕТЫ ==========
 RESPONSES = [
@@ -193,8 +196,9 @@ class FunPayBot:
 
 funpay_bot = FunPayBot()
 
-# ========== ОБРАБОТКА СООБЩЕНИЙ ==========
+# ========== ОБРАБОТКА FUNPAY ==========
 def process_message(msg):
+    global auto_reply_enabled
     with message_lock:
         if msg['id'] in processed_messages: return
         processed_messages.add(msg['id'])
@@ -204,72 +208,95 @@ def process_message(msg):
         node_id = msg.get('node_id', msg['id'])
         chat_link = f"https://funpay.com/chat/?node={node_id}"
         
-        funpay_bot.send(msg['id'], reply)
+        if auto_reply_enabled:
+            funpay_bot.send(msg['id'], reply)
         
         if is_call:
-            tg_send(f"🚨 <b>ВЫЗОВ ПРОДАВЦА!</b>\n\n👤 {sender}\n💬 {msg['text']}\n🕐 {datetime.now().strftime('%H:%M:%S')}\n\n📩 <a href='{chat_link}'>Открыть чат</a>", False)
+            tg_send(TELEGRAM_CHAT_ID, f"🚨 <b>ВЫЗОВ ПРОДАВЦА!</b>\n\n👤 {sender}\n💬 {msg['text']}\n🕐 {datetime.now().strftime('%H:%M:%S')}\n\n📩 <a href='{chat_link}'>Открыть чат</a>", False)
         else:
-            tg_send(f"🔔 <b>FunPay</b>\n\n👤 {sender}\n💬 {msg['text']}\n🕐 {datetime.now().strftime('%H:%M:%S')}\n\n💬 Бот: {reply[:150]}\n\n📩 <a href='{chat_link}'>Открыть чат</a>", True)
+            status = "🤖 Автоответ отправлен" if auto_reply_enabled else "🔇 Автоответ выключен"
+            tg_send(TELEGRAM_CHAT_ID, f"🔔 <b>FunPay</b>\n\n👤 {sender}\n💬 {msg['text']}\n🕐 {datetime.now().strftime('%H:%M:%S')}\n\n{status}\n📩 <a href='{chat_link}'>Открыть чат</a>", True)
 
 def scheduled_check():
     for m in funpay_bot.check_messages():
         Thread(target=process_message, args=(m,)).start()
 
-# ========== ОБРАБОТКА КОМАНД ИЗ ТГ ==========
-last_update_id = 0
+# ========== WEBHOOK TELEGRAM ==========
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    data = request.get_json()
+    if not data: return "ok"
+    
+    msg = data.get("message", {})
+    text = msg.get("text", "")
+    chat_id = str(msg.get("chat", {}).get("id", ""))
+    
+    # Отвечаем только админу
+    if chat_id != TELEGRAM_CHAT_ID:
+        return "ok"
+    
+    global auto_reply_enabled
+    
+    if text == "/start":
+        tg_send(chat_id, "🤖 <b>FunPay AutoResponder</b>\n\n"
+                "/status — статистика\n"
+                "/login — перезайти в FunPay\n"
+                "/check — проверить сообщения\n"
+                "/on — вкл автоответы\n"
+                "/off — выкл автоответы\n"
+                "/help — помощь")
+    elif text == "/status":
+        tg_send(chat_id, f"📊 <b>Статус</b>\n\n"
+                f"FunPay: {'✅' if funpay_bot.logged_in else '❌'} {funpay_bot.username}\n"
+                f"Автоответ: {'✅' if auto_reply_enabled else '❌'}\n"
+                f"Отвечено: {len(processed_messages)}\n"
+                f"Время: {datetime.now().strftime('%H:%M:%S')}")
+    elif text == "/login":
+        tg_send(chat_id, "🔄 Перезаход в FunPay...")
+        ok = funpay_bot.login()
+        tg_send(chat_id, f"✅ Вход: {funpay_bot.username}" if ok else "❌ Не удалось войти")
+    elif text == "/check":
+        msgs = funpay_bot.check_messages()
+        for m in msgs:
+            Thread(target=process_message, args=(m,)).start()
+        tg_send(chat_id, f"📩 Найдено: {len(msgs)}" if msgs else "📭 Новых нет")
+    elif text == "/on":
+        auto_reply_enabled = True
+        tg_send(chat_id, "✅ Автоответы включены")
+    elif text == "/off":
+        auto_reply_enabled = False
+        tg_send(chat_id, "🔇 Автоответы выключены. Уведомления о сообщениях будут приходить.")
+    elif text == "/help":
+        tg_send(chat_id, "/status — статус\n/login — вход в FunPay\n/check — проверка\n/on — вкл автоответ\n/off — выкл автоответ")
+    
+    return "ok"
 
-def process_tg_commands():
-    global last_update_id
-    updates = tg_get_updates(last_update_id + 1)
-    for upd in updates:
-        last_update_id = upd["update_id"]
-        msg = upd.get("message")
-        if not msg: continue
-        text = msg.get("text", "")
-        chat_id = msg["chat"]["id"]
-        
-        if str(chat_id) != TELEGRAM_CHAT_ID: continue  # только ты
-        
-        if text == "/start":
-            tg_send("🤖 <b>FunPay AutoResponder</b>\n\n"
-                    "Команды:\n"
-                    "/status — статистика\n"
-                    "/login — перезайти в FunPay\n"
-                    "/check — проверить сообщения\n"
-                    "/on — включить автоответы\n"
-                    "/off — выключить автоответы")
-        elif text == "/status":
-            tg_send(f"📊 <b>Статус</b>\n\n"
-                    f"FunPay: {'✅' if funpay_bot.logged_in else '❌'} {funpay_bot.username}\n"
-                    f"Отвечено: {len(processed_messages)}\n"
-                    f"Время: {datetime.now().strftime('%H:%M:%S')}")
-        elif text == "/login":
-            tg_send("🔄 Перезаход в FunPay...")
-            ok = funpay_bot.login()
-            tg_send(f"✅ Вход: {funpay_bot.username}" if ok else "❌ Не удалось войти")
-        elif text == "/check":
-            msgs = funpay_bot.check_messages()
-            for m in msgs:
-                Thread(target=process_message, args=(m,)).start()
-            tg_send(f"📩 Найдено: {len(msgs)}" if msgs else "📭 Новых нет")
-
-# ========== ВЕБ (для здоровья) ==========
 @app.route('/')
 def index():
-    return jsonify({'status': 'running', 'funpay': funpay_bot.logged_in, 'username': funpay_bot.username, 'processed': len(processed_messages)})
+    return jsonify({'status': 'running', 'funpay': funpay_bot.logged_in, 'username': funpay_bot.username, 'processed': len(processed_messages), 'auto_reply': auto_reply_enabled})
 
 @app.route('/health')
 def health():
     return jsonify({'status': 'ok'})
 
 if __name__ == '__main__':
-    logger.info("⚡ FunPay TG Bot старт")
-    funpay_bot.login()
-    tg_send("🟢 <b>Бот FunPay запущен!</b>\n\nЛот: Сопровождение на 7 карту 10кк радка\n\nКоманды:\n/status — статус\n/login — перезаход\n/check — проверка\n/on /off — вкл/выкл")
+    logger.info("⚡ FunPay TG Bot v5 запуск")
     
+    # Устанавливаем вебхук
+    tg_set_webhook()
+    
+    # Логинимся
+    funpay_bot.login()
+    
+    # Уведомление
+    if funpay_bot.logged_in:
+        tg_send(TELEGRAM_CHAT_ID, f"🟢 <b>Бот запущен!</b>\n\nАккаунт: {funpay_bot.username}\nАвтоответ: ✅\n\nКоманды: /status /login /check /on /off")
+    else:
+        tg_send(TELEGRAM_CHAT_ID, "🟡 Бот запущен, но FunPay ❌. Напиши /login для входа.")
+    
+    # Планировщик
     scheduler = BackgroundScheduler()
     scheduler.add_job(scheduled_check, 'interval', seconds=CHECK_INTERVAL)
-    scheduler.add_job(process_tg_commands, 'interval', seconds=5)
     scheduler.start()
     
     app.run(host='0.0.0.0', port=PORT, debug=False)
