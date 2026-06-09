@@ -1,7 +1,7 @@
 """
-FunPay_AutoResponder + Telegram
+FunPay_AutoResponder + Telegram v3
 Лот: Сопровождение на 7 карту 10кк радка
-24/7, уведомления в ТГ с ссылкой на чат
+24/7, обход блокировок
 """
 
 import os
@@ -114,50 +114,130 @@ def get_response(message):
 # ========== FUNPAY ==========
 class FunPayBot:
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': ua.random,
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'ru-RU,ru;q=0.9',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        })
         self.logged_in = False
         self.csrf_token = None
         self.username = "Продавец"
+        self.session = None
+        self._init_session()
+    
+    def _init_session(self):
+        """Создаёт новую сессию с правильными заголовками"""
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': ua.random,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+        })
+        # Начальные куки как у обычного браузера
+        self.session.cookies.set('lang', 'ru')
+        self.session.cookies.set('timezone', 'Europe/Moscow')
     
     def login(self):
+        """Вход в FunPay"""
         try:
-            r = self.session.get('https://funpay.com/')
+            self._init_session()
+            
+            # Загружаем главную (как браузер)
+            logger.info("Загрузка funpay.com...")
+            r = self.session.get('https://funpay.com/', timeout=30)
+            logger.info(f"Главная: {r.status_code}")
+            
+            # Ищем CSRF
             match = re.search(r'name="_csrf"[^>]*value="([^"]*)"', r.text)
-            if not match:
+            if match:
+                self.csrf_token = match.group(1)
+                logger.info(f"CSRF: {self.csrf_token[:20]}...")
+            else:
+                logger.error("CSRF не найден")
+                # Попробуем из кук
+                for c in self.session.cookies:
+                    if 'csrf' in c.name.lower():
+                        self.csrf_token = c.value
+                        logger.info(f"CSRF из кук: {self.csrf_token[:20]}...")
+                        break
+            
+            if not self.csrf_token:
                 return False
-            self.csrf_token = match.group(1)
             
-            data = {'username': FUNPAY_EMAIL, 'password': FUNPAY_PASSWORD, '_csrf': self.csrf_token}
-            r = self.session.post('https://funpay.com/account/login', data=data,
-                                  headers={'X-Requested-With': 'XMLHttpRequest', 'Referer': 'https://funpay.com/'})
+            # Пауза как человек
+            import time
+            time.sleep(1)
             
-            if r.status_code == 200 and 'error' not in r.text.lower():
-                self.logged_in = True
-                try:
-                    r2 = self.session.get('https://funpay.com/account/')
-                    nick = re.search(r'data-user-name="([^"]*)"', r2.text)
+            # Логинимся
+            login_url = 'https://funpay.com/account/login'
+            login_data = {
+                'username': FUNPAY_EMAIL,
+                'password': FUNPAY_PASSWORD,
+                '_csrf': self.csrf_token
+            }
+            
+            login_headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': 'https://funpay.com/',
+                'Origin': 'https://funpay.com',
+            }
+            
+            logger.info(f"Отправка логина...")
+            r = self.session.post(login_url, data=login_data, headers=login_headers, timeout=30)
+            logger.info(f"Ответ логина: {r.status_code}")
+            logger.info(f"Тело: {r.text[:300]}")
+            
+            if r.status_code == 200:
+                # Проверяем ответ
+                text_lower = r.text.lower()
+                if 'error' in text_lower or 'неверн' in text_lower or 'неправиль' in text_lower:
+                    logger.error(f"Ошибка входа: {r.text[:300]}")
+                    return False
+                
+                # Проверяем что реально залогинились
+                time.sleep(1)
+                check_r = self.session.get('https://funpay.com/account/', timeout=30)
+                
+                if 'logout' in check_r.text.lower() or 'выход' in check_r.text.lower():
+                    self.logged_in = True
+                    
+                    # Ищем username
+                    nick = re.search(r'data-user-name="([^"]*)"', check_r.text)
                     if nick:
                         self.username = nick.group(1)
-                except:
-                    pass
-                logger.info(f"✅ Вход: {self.username}")
-                return True
-            return False
+                    else:
+                        nick = re.search(r'<span[^>]*class="user-name[^"]*"[^>]*>(.*?)</span>', check_r.text)
+                        if nick:
+                            self.username = re.sub(r'<[^>]+>', '', nick.group(1)).strip()
+                    
+                    logger.info(f"✅ Вход успешен: {self.username}")
+                    
+                    # Уведомление в ТГ
+                    send_telegram(f"✅ <b>Бот вошёл в FunPay</b>\n\nАккаунт: {self.username}\nВремя: {datetime.now().strftime('%H:%M:%S')}")
+                    
+                    return True
+                else:
+                    logger.error(f"Не залогинились. Ответ: {check_r.text[:300]}")
+                    return False
+            else:
+                logger.error(f"Код ответа: {r.status_code}")
+                return False
+                
         except Exception as e:
-            logger.error(f"❌ {e}")
+            logger.error(f"❌ Исключение: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     def check_messages(self):
         if not self.logged_in and not self.login():
             return []
         try:
-            r = self.session.get('https://funpay.com/chat/', headers={'X-Requested-With': 'XMLHttpRequest'})
+            r = self.session.get('https://funpay.com/chat/', headers={'X-Requested-With': 'XMLHttpRequest'}, timeout=30)
             return self.parse(r.text) if r.status_code == 200 else []
         except:
             return []
@@ -198,7 +278,8 @@ class FunPayBot:
             data = {'msg': message, 'interlocutor': chat_id, '_csrf': self.csrf_token}
             r = self.session.post('https://funpay.com/chat/send', data=data,
                                   headers={'X-Requested-With': 'XMLHttpRequest',
-                                           'Referer': f'https://funpay.com/chat/?interlocutor={chat_id}'})
+                                           'Referer': f'https://funpay.com/chat/?interlocutor={chat_id}'},
+                                  timeout=30)
             return r.status_code == 200
         except:
             return False
@@ -305,7 +386,7 @@ h2{color:#58a6ff;margin-bottom:12px}
 let checks=0,start=new Date();
 function addLog(m,t){t=t||'info';let d=document.getElementById('log');let time=new Date().toLocaleTimeString('ru-RU');d.innerHTML+=`<div><span class="time">${time}</span> <span class="${t}">${m}</span></div>`;d.scrollTop=d.scrollHeight}
 function updateUptime(){let d=Math.floor((new Date()-start)/1000);let h=Math.floor(d/3600);let m=Math.floor((d%3600)/60);document.getElementById('uptime').textContent=String(h).padStart(2,'0')+':'+String(m).padStart(2,'0')}
-async function testFP(){addLog('FunPay...','info');try{let r=await fetch('/api/test');let d=await r.json();if(d.ok){document.getElementById('fpStatus').textContent='✅ Онлайн';document.getElementById('fpStatus').className='status online';addLog('Подключён','ok')}else{document.getElementById('fpStatus').textContent='❌ Ошибка';document.getElementById('fpStatus').className='status offline';addLog(d.error,'err')}}catch(e){addLog(e.message,'err')}}
+async function testFP(){addLog('Проверка входа в FunPay...','info');document.getElementById('fpStatus').textContent='⏳';document.getElementById('fpStatus').className='status offline';try{let r=await fetch('/api/test');let d=await r.json();if(d.ok){document.getElementById('fpStatus').textContent='✅ Онлайн';document.getElementById('fpStatus').className='status online';addLog('Вход выполнен: '+d.user,'ok')}else{document.getElementById('fpStatus').textContent='❌ Ошибка';document.getElementById('fpStatus').className='status offline';addLog('Ошибка: '+d.error,'err')}}catch(e){addLog(e.message,'err')}}
 async function testTG(){addLog('Telegram...','info');try{let r=await fetch('/api/test_tg');let d=await r.json();if(d.ok){document.getElementById('tgStatus').textContent='✅ Онлайн';document.getElementById('tgStatus').className='status online';addLog('Работает','ok')}else{document.getElementById('tgStatus').textContent='❌ Ошибка';document.getElementById('tgStatus').className='status offline';addLog(d.error,'err')}}catch(e){addLog(e.message,'err')}}
 async function testCall(){addLog('Тест вызова...','warn');try{let r=await fetch('/api/test_call');let d=await r.json();addLog(d.ok?'Отправлено':'Ошибка',d.ok?'ok':'err')}catch(e){addLog(e.message,'err')}}
 async function forceCheck(){checks++;document.getElementById('checkCount').textContent=checks;try{let r=await fetch('/api/check');let d=await r.json();document.getElementById('msgCount').textContent=d.total;addLog(d.messages>0?'+'+d.messages:'Нет',d.messages>0?'ok':'info')}catch(e){addLog(e.message,'err')}}
@@ -320,7 +401,7 @@ def dashboard():
 @app.route('/api/test')
 def api_test():
     ok = funpay_bot.login()
-    return jsonify({'ok': ok, 'error': '' if ok else 'Не удалось войти'})
+    return jsonify({'ok': ok, 'error': '' if ok else 'Не удалось войти', 'user': funpay_bot.username})
 
 @app.route('/api/test_tg')
 def api_test_tg():
@@ -357,8 +438,6 @@ def health():
 
 if __name__ == '__main__':
     logger.info("⚡ Старт")
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-        send_telegram("🟢 <b>Бот FunPay запущен 24/7</b>\n\nЛот: Сопровождение на 7 карту 10кк радка\nУведомления со ссылкой на чат включены.")
     funpay_bot.login()
     scheduler = BackgroundScheduler()
     scheduler.add_job(scheduled_check, 'interval', seconds=CHECK_INTERVAL)
