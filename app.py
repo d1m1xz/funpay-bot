@@ -19,7 +19,7 @@ from fake_useragent import UserAgent
 load_dotenv()
 
 # ========== КОНФИГУРАЦИЯ ==========
-FUNPAY_PHONE = os.getenv("FUNPAY_PHONE", "")
+FUNPAY_EMAIL = os.getenv("FUNPAY_EMAIL", "")
 FUNPAY_PASSWORD = os.getenv("FUNPAY_PASSWORD", "")
 FUNPAY_GOLDEN_KEY = os.getenv("FUNPAY_GOLDEN_KEY", "")
 
